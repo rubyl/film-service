@@ -1,49 +1,85 @@
-'use strict'
-// we load all the depencies we need
-const {
-  EventEmitter
-} = require('events')
-const server = require('./server/server')
-const repository = require('./repository/repository')
-const config = require('./config/')
-const mediator = new EventEmitter()
+const Koa = require("koa");
+const cors = require('@koa/cors');
+const Router = require("koa-router");
+const BodyParser = require("koa-bodyparser");
+const logger = require("koa-logger");
+const ObjectID = require("mongodb").ObjectID;
+const jwt = require("./middleware/jwt");
+const requestBody = require('./middleware/requestBody');
 
-// verbose logging when we are starting the server
-console.log('--- Movies Service ---')
-console.log('Connecting to movies repository...')
+const app = new Koa();
+const router = new Router();
+const securedRouter = new Router();
+require("./mongo")(app)
 
-// log unhandled execpetions
-process.on('uncaughtException', (err) => {
-  console.error('Unhandled Exception', err)
+app.use(BodyParser())
+app.use(logger());
+app.use(cors());
+app.use(async (ctx, next) => {
+  try {
+    await next();
+  } catch (err) {
+    console.log(err)
+    err.status = err.statusCode || err.status || 500;
+    ctx.body = err.message;
+    ctx.app.emit('error', err, ctx);
+  }
+});
+// app.use(requestBody());
+app.use(router.routes()).use(router.allowedMethods());
+app.use(securedRouter.routes()).use(securedRouter.allowedMethods());
+securedRouter.use(jwt.errorHandler()).use(jwt.jwt());
+
+
+router.get("/", async (ctx, next) => {
+  ctx.body = await ctx.app.film.find().toArray();
+});
+
+// router.use("/film/:id", requestBody())
+router.get("/film/:id", async (ctx) => {
+  ctx.body = await ctx.app.film.findOne({
+    "_id": ObjectID(ctx.params.id)
+  });
+});
+
+router.post("/film", async function(ctx) {
+  ctx.body = await ctx.app.film.insert(ctx.request.body);
+});
+
+router.put("/film/:id", async function(ctx) {
+  let documentQuery = {
+    "_id": ObjectID(ctx.params.id)
+  };
+  let valuesToUpdate = ctx.request.body;
+  ctx.body = await ctx.app.film.updateOne(documentQuery, {
+    $set: valuesToUpdate
+  });
 })
-process.on('uncaughtRejection', (err, promise) => {
-  console.error('Unhandled Rejection', err)
+
+router.delete("/film/:id", async function(ctx) {
+  let documentQuery = {
+    "_id": ObjectID(ctx.params.id)
+  };
+  ctx.body = await ctx.app.film.deleteOne(documentQuery)
 })
 
-// event listener when the repository has been connected
-mediator.on('db.ready', (db) => {
-  let rep
-  repository.connect(db)
-    .then(repo => {
-      console.log('Repository Connected. Starting Server')
-      rep = repo
-      return server.start({
-        port: config.serverSettings.port,
-        repo
+router.post("/auth", async (ctx) => {
+  let username = ctx.request.body.username;
+  let password = ctx.request.body.password;
+
+  if (username === "user" && password === "pwd") {
+    ctx.body = {
+      token: jwt.issue({
+        user: "user",
+        role: "admin"
       })
-    })
-    .then(app => {
-      console.log(`Server started succesfully, running on port: ${config.serverSettings.port}.`)
-      app.on('close', () => {
-        rep.disconnect()
-      })
-    })
-})
-mediator.on('db.error', (err) => {
-  console.error(err)
-})
+    }
+  } else {
+    ctx.status = 401;
+    ctx.body = {
+      error: "Invalid login"
+    }
+  }
+});
 
-// we load the connection to the repository
-config.db.connect(config.dbSettings, mediator)
-// init the repository connection, and the event listener will handle the rest
-mediator.emit('boot.ready')
+app.listen(3000);
